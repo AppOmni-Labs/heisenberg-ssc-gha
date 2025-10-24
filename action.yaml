@@ -1,0 +1,305 @@
+name: "Heisenberg Dependency Health Check"
+description: "Gates PRs by checking new/changed deps via deps.dev + heuristics (PyPI, npm, Go)"
+author: "AppOmni"
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  package_file:
+    description: "Path to lock/manifest (poetry.lock, uv.lock, package-lock.json, yarn.lock, requirements.txt, go.mod)"
+    required: true  
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        pip install --upgrade pip
+        pip install toml beautifulsoup4 requests yarnlock
+
+    - name: Fetch base dependencies manifest
+      shell: bash
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          git fetch origin "$BASE_REF" --depth=1
+          mkdir -p "$(dirname "${{ inputs.package_file }}")"
+          if git show "origin/$BASE_REF:${{ inputs.package_file }}" > "${{ inputs.package_file }}.base" 2> fetch_err.log; then
+            echo "✅ dependencies manifest fetched successfully"
+          else
+            echo "::warning::⚠️ Failed to fetch base manifest"
+            echo "::group::git show error output"
+            cat fetch_err.log || true
+            echo "::endgroup::"
+            : > "${{ inputs.package_file }}.base"
+          fi
+        else
+          git show "HEAD^:${{ inputs.package_file }}" > "${{ inputs.package_file }}.base" 2>/dev/null || : > "${{ inputs.package_file }}.base"
+        fi
+
+    - name: Extract only new/changed dependencies
+      shell: bash
+      run: python "${{ github.action_path }}/src/dependency_extract.py" "${{ inputs.package_file }}"
+
+    - name: Run dependencies health check
+      shell: bash
+      run: |
+        LOCK_FILE="${{ inputs.package_file }}"
+        if [[ "$LOCK_FILE" == *poetry.lock ]]; then
+          MGMT="pypi"
+        elif [[ "$LOCK_FILE" == *uv.lock ]]; then
+          MGMT="pypi"
+        elif [[ "$LOCK_FILE" == *package-lock.json ]]; then
+          MGMT="npm"
+        elif [[ "$LOCK_FILE" == *yarn.lock ]]; then
+          MGMT="npm"
+        elif [[ "$LOCK_FILE" == *requirements.txt ]]; then
+          MGMT="pypi"
+        elif [[ "$LOCK_FILE" == *go.mod ]]; then
+          MGMT="go"
+        else
+          echo "::error::Unsupported lock file type: $LOCK_FILE"
+          exit 1
+        fi
+
+        while read -r name version; do
+          [[ -z "$name" ]] && continue
+          echo "::group::Checking $name $version"
+          python "${{ github.action_path }}/src/heisenberg_health_check.py" main_package -mgmt "$MGMT" -pkg "$name" -v "$version"
+          echo "::endgroup::"
+        done < parsed_deps.txt
+
+    - name: Generate report
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        PACKAGE_FILE: ${{ inputs.package_file }}
+      run: |
+        echo "### 🧪 Dependency Health Report" > results.md
+        echo "" >> results.md
+        EXIT_CODE=0
+
+        LOCK_FILE="$PACKAGE_FILE"
+        if [[ "$LOCK_FILE" == *poetry.lock ]]; then
+          MGMT="pypi"
+        elif [[ "$LOCK_FILE" == *uv.lock ]]; then
+          MGMT="pypi"
+        elif [[ "$LOCK_FILE" == *package-lock.json ]]; then
+          MGMT="npm"
+        elif [[ "$LOCK_FILE" == *yarn.lock ]]; then
+          MGMT="npm"
+        elif [[ "$LOCK_FILE" == *requirements.txt ]]; then
+          MGMT="pypi"
+        elif [[ "$LOCK_FILE" == *go.mod ]]; then
+          MGMT="go"
+        else
+          echo "::error::Unsupported lock file type for report generation: $LOCK_FILE"
+          exit 1
+        fi
+
+        write_report_entry() {
+          PKG="$1"
+          VERSION="$2"
+          DEPS_URL="$3"
+          SNYK_URL="$4"
+          SOCKET_URL="$5"
+          RAW_BLOCK="$6"
+          SUMMARY="$7"
+
+          echo "#### $PKG@$VERSION" >> results.md
+          echo "[Deps.dev]($DEPS_URL) | [Snyk Advisor]($SNYK_URL) | [Socket]($SOCKET_URL)" >> results.md
+          echo "" >> results.md
+          echo "$SUMMARY" >> results.md
+          echo "" >> results.md
+          echo "<details><summary>Raw details</summary>" >> results.md
+          echo "" >> results.md
+          echo '```' >> results.md
+          echo "$RAW_BLOCK" >> results.md
+          echo '```' >> results.md
+          echo "</details>" >> results.md
+          echo "" >> results.md
+
+          EXIT_CODE=1
+        }
+
+        make_summary_line() {
+          local name="$1" ver="$2" score="$3" sec_count="$4" fresh="$5" has_post="$6" deprecated="$7"
+          local bits=()
+
+          if [[ "$sec_count" =~ ^[0-9]+$ ]] && [[ "$sec_count" -gt 0 ]]; then
+            bits+=("**🚨 Security advisories:** $sec_count")
+          fi
+
+          if [[ -n "$deprecated" && "$deprecated" != "N/A" && "$deprecated" != "None" ]]; then
+            bits+=("**💀 Deprecated Package**")
+          fi
+
+          if [[ "$score" == "N/A" || "$score" == "Not Found" || "$score" == "Unknown" || ! "$score" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            bits+=("**⚠️ Health Score:** Unknown")
+          elif awk "BEGIN {exit !($score < 3.0)}"; then
+            bits+=("**❗ Health Score:** $score")
+          fi
+
+          if [[ "$fresh" == "Yes" ]]; then
+            bits+=("**🕒 Fresh publish (<24h)**")
+          fi
+
+          if [[ "$has_post" == "Yes" ]]; then
+            bits+=("**⚙️ Postinstall script present**")
+          fi
+
+          local joined="$(IFS=' • '; echo "${bits[*]}")"
+          echo "**Findings:** ${joined}"
+        }
+
+        while read -r name version; do
+          [[ -z "$name" ]] && continue
+          output=$(python "$ACTION_PATH/src/heisenberg_health_check.py" main_package -mgmt "$MGMT" -pkg "$name" -v "$version")
+
+          score=$(echo "$output" | awk -F': ' '/^Package Health Score:/ {print $2}' | xargs)
+          fresh=$(echo "$output" | awk -F': ' '/^Fresh Publish \(<24h\):/ {print $2}' | xargs)
+          published_at=$(echo "$output" | awk -F': ' '/^Published At:/ {print $2}' | xargs)
+          sec_count=$(echo "$output" | awk -F': ' '/^Security Advisory Count:/ {print $2}' | xargs)
+          deprecated=$(echo "$output" | awk -F': ' '/^Deprecated:/ {print substr($0, index($0,$2))}' | xargs) 
+
+          has_postinstall=$(echo "$output" | awk -F': ' '/^Has Postinstall:/ {print $2}' | xargs)
+          lifecycle=$(echo "$output" | awk -F': ' '/^Lifecycle Scripts:/ {print $2}' | xargs)
+          post_cmd=$(echo "$output" | awk -F': ' '/^Postinstall Cmd:/ {print substr($0, index($0,$2)) }')
+
+          pkg_safe_name=$(echo "$name" | tr '_' '-' | tr '[:upper:]' '[:lower:]')
+
+          if [[ "$MGMT" == "pypi" ]]; then
+            deps_url="https://deps.dev/pypi/${pkg_safe_name}/${version}"
+            snyk_url="https://snyk.io/advisor/python/${pkg_safe_name}"
+            socket_url="https://socket.dev/pypi/package/${pkg_safe_name}"
+          elif [[ "$MGMT" == "npm" ]]; then
+            deps_url="https://deps.dev/npm/${pkg_safe_name}/${version}"
+            snyk_url="https://snyk.io/advisor/npm-package/${pkg_safe_name}"
+            socket_url="https://socket.dev/npm/package/${pkg_safe_name}"
+          else
+            deps_url="https://deps.dev/go/${pkg_safe_name}/${version}"
+            snyk_url="https://snyk.io/advisor/golang/${pkg_safe_name}"
+            socket_url="https://socket.dev/go/package/${pkg_safe_name}"
+          fi
+
+          need_entry=0
+
+          if [[ "$MGMT" == "npm" && "$has_postinstall" == "Yes" ]]; then
+            echo "::error::$name defines a postinstall script (${lifecycle:-postinstall}): ${post_cmd}"
+            need_entry=1
+          fi
+
+          if [[ "$fresh" == "Yes" ]]; then
+            echo "::warning::${name}@${version} was published in the last 24h (Published At: ${published_at})."
+            need_entry=1
+          fi
+
+          if [[ "$score" == "N/A" || "$score" == "Not Found" || "$score" == "Unknown" || ! "$score" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+            echo "::warning::$name has unknown health score"
+            need_entry=1
+          elif awk "BEGIN {exit !($score < 3.0)}"; then
+            echo "::error::$name has low health score: $score"
+            need_entry=1
+          fi
+
+          if [[ "$sec_count" =~ ^[0-9]+$ ]] && [[ "$sec_count" -gt 0 ]]; then
+            echo "::error::$name has known security advisories: $sec_count"
+            need_entry=1
+          fi
+
+          if [[ -n "$deprecated" && "$deprecated" != "N/A" && "$deprecated" != "None" ]]; then
+            echo "::error::$name is deprecated: $deprecated"
+            need_entry=1
+          fi
+
+          if [[ "$need_entry" -eq 1 ]]; then
+            [[ "$has_postinstall" == "Yes" ]] || has_postinstall="No"
+            summary_line=$(make_summary_line "$name" "$version" "$score" "$sec_count" "$fresh" "$has_postinstall" "$deprecated")
+            write_report_entry "$name" "$version" "$deps_url" "$snyk_url" "$socket_url" "$output" "$summary_line"
+          fi
+        done < parsed_deps.txt
+
+        if [[ "$EXIT_CODE" -eq 1 ]]; then
+          sed -i '1a ### Dependencies Below Require Further Attention' results.md
+          echo "" >> results.md
+          echo "---" >> results.md
+          echo "If you think this is a false positive or would like to accept the risk, comment **accept-risk** to stop future notifications about these packages." >> results.md
+          echo "::error::One or more dependencies have a low or an unknown health score."
+          echo "exit_code=1" >> $GITHUB_ENV
+        else
+          sed -i '1a ### All Added / Changed Dependencies Passed Check' results.md
+          echo "::notice::All dependencies passed the health check."
+          echo "exit_code=0" >> $GITHUB_ENV
+        fi
+
+    - name: Check for security risk acceptance override
+      if: env.exit_code == '1' && github.event_name == 'pull_request'
+      id: check_override
+      uses: actions/github-script@v7
+      env:
+        PACKAGE_FILE: ${{ inputs.package_file }}
+      with:
+        script: |
+          const packageFile = process.env.PACKAGE_FILE;
+          const { data: commits } = await github.rest.repos.listCommits({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            sha: context.sha,
+            path: packageFile,
+            per_page: 1
+          });
+          if (commits.length === 0) return core.setOutput('override_approved', false);
+          const lastPackageChangeTime = new Date(commits[0].commit.author.date);
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number
+          });
+          const ok = comments.some(c => {
+            const t = new Date(c.created_at);
+            const body = (c.body || '').trim().toLowerCase();
+            const said = body.includes('accept-risk') || body.includes('override') || body.includes('skip-security');
+            return said && t > lastPackageChangeTime;
+          });
+          core.setOutput('override_approved', ok);
+
+    - name: Comment on PR
+      if: ${{ github.event_name == 'pull_request' && env.exit_code == '1' && steps.check_override.outputs.override_approved != 'true' }}
+      uses: peter-evans/create-or-update-comment@v4
+      with:
+        issue-number: ${{ github.event.pull_request.number }}
+        body-path: results.md
+      env:
+        GITHUB_TOKEN: ${{ github.token }}  
+
+    - name: Add 'security review' label if needed
+      if: env.exit_code == '1' && steps.check_override.outputs.override_approved != 'true'
+      uses: actions-ecosystem/action-add-labels@v1
+      with:
+        github_token: ${{ github.token }}
+        labels: security review
+
+    - name: Report dependency health status
+      shell: bash
+      run: |
+        if [[ "${{ env.exit_code }}" == "1" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" && "${{ steps.check_override.outputs.override_approved }}" == "true" ]]; then
+            echo "::warning::Heisenberg - dependency health check found issues, but risks have been accepted via PR comment"
+            echo "::notice::See PR comment for details on accepted risks"
+          else
+            echo "::warning::Heisenberg - dependency health check found issues. See PR comment for flagged packages."
+            echo "::notice::To accept these risks, comment 'accept-risk' on this PR"
+            echo "::notice::⚠️ HEISENBERG IN WARNING MODE - CI will pass but please review security findings"
+            # If you want to hard-fail merges, uncomment the next line:
+            # exit 1
+          fi
+        else
+          echo "::notice::All dependencies passed the health check."
+        fi
