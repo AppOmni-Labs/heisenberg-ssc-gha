@@ -59,7 +59,7 @@ jobs:
           package_file: ${{ steps.detect.outputs.lock_path }}
 ```
 
-### Disable the security review label
+### Disable the `Security Review` label
 
 If you don't want the action to add the `Security Review` label to PRs with flagged dependencies, set `add_security_label` to `"false"`:
 
