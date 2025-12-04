@@ -18,11 +18,18 @@ It scans new or changed dependencies only (from your lock/manifest), pulls healt
     
 > **Non-blocking by default:** It is not a hard block just a speedbump so you can be alerted if something suspicious detected. Your CI pipeline won't fail, but dependency risks will be surfaced in the comment. You can comment `accept-risk` on the PR to suppress future notifications for the flagged packages until you do another commit to the manifest.
 
+## Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `package_file` | Yes | — | Path to lock/manifest file (e.g., `poetry.lock`, `package-lock.json`, `go.mod`) |
+| `add_security_label` | No | `"true"` | Whether to add the `security review` label when issues are found |
+
 ## Quick start
 
 Minimal workflow for a repo that uses Poetry / npm / Yarn / Go:
 
-```
+```yaml
 name: Heisenberg Health Check
 on:
   pull_request:
@@ -37,7 +44,7 @@ on:
 permissions:
   contents: read
   pull-requests: write   # PR comment
-  issues: write          # create label
+  issues: write          # create label (only needed if add_security_label is true)
 
 jobs:
   deps-health:
@@ -57,4 +64,16 @@ jobs:
         uses: AppOmni-Labs/heisenberg-ssc-gha@v1
         with:
           package_file: ${{ steps.detect.outputs.lock_path }}
+```
+
+### Disable the security review label
+
+If you don't want the action to add the `security review` label to PRs with flagged dependencies, set `add_security_label` to `"false"`:
+
+```yaml
+      - name: Heisenberg Dependency Health Check
+        uses: AppOmni-Labs/heisenberg-ssc-gha@v1
+        with:
+          package_file: ${{ steps.detect.outputs.lock_path }}
+          add_security_label: "false"
 ```
