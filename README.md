@@ -22,7 +22,7 @@ It scans new or changed dependencies only (from your lock/manifest), pulls healt
 
 Minimal workflow for a repo that uses Poetry / npm / Yarn / Go:
 
-```
+```yaml
 name: Heisenberg Health Check
 on:
   pull_request:
@@ -37,7 +37,7 @@ on:
 permissions:
   contents: read
   pull-requests: write   # PR comment
-  issues: write          # create label
+  issues: write          # create label (only needed if add_security_label is true)
 
 jobs:
   deps-health:
@@ -57,4 +57,16 @@ jobs:
         uses: AppOmni-Labs/heisenberg-ssc-gha@v1
         with:
           package_file: ${{ steps.detect.outputs.lock_path }}
+```
+
+### Disable the security review label
+
+If you don't want the action to add the `Security Review` label to PRs with flagged dependencies, set `add_security_label` to `"false"`:
+
+```yaml
+      - name: Heisenberg Dependency Health Check
+        uses: AppOmni-Labs/heisenberg-ssc-gha@v1
+        with:
+          package_file: ${{ steps.detect.outputs.lock_path }}
+          add_security_label: "false"
 ```
