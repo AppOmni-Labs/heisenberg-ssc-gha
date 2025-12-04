@@ -10,7 +10,7 @@ inputs:
     description: "Path to lock/manifest (poetry.lock, uv.lock, package-lock.json, yarn.lock, requirements.txt, go.mod)"
     required: true
   add_security_label:
-    description: "Whether to add 'security review' label when issues are found"
+    description: "Specify if you want to add 'Security Review' label when issues are found"
     required: false
     default: "true"
 
