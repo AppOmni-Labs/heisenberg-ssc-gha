@@ -8,7 +8,11 @@ branding:
 inputs:
   package_file:
     description: "Path to lock/manifest (poetry.lock, uv.lock, package-lock.json, yarn.lock, requirements.txt, go.mod)"
-    required: true  
+    required: true
+  add_security_label:
+    description: "Whether to add 'security review' label when issues are found"
+    required: false
+    default: "true"
 
 runs:
   using: "composite"
@@ -280,7 +284,7 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}  
 
     - name: Add 'security review' label if needed
-      if: env.exit_code == '1' && steps.check_override.outputs.override_approved != 'true'
+      if: env.exit_code == '1' && steps.check_override.outputs.override_approved != 'true' && inputs.add_security_label == 'true'
       uses: actions-ecosystem/action-add-labels@v1
       with:
         github_token: ${{ github.token }}
