@@ -33,10 +33,10 @@ def extract_npm(path: str) -> Set[str]:
     for pkg_path, details in packages.items():
         if not pkg_path or "version" not in details:
             continue
-
         package_name = pkg_path
-        if package_name.startswith("node_modules/"):
-            package_name = package_name.split("/", 1)[1]
+        last_nm_idx = package_name.rfind("node_modules/")
+        if last_nm_idx != -1:
+            package_name = package_name[last_nm_idx + len("node_modules/"):]
 
         result.add(f"{package_name}=={details['version']}")
     return result
